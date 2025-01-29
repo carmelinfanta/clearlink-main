@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\AccessToken;
 use App\Models\CreditNotes;
 use App\Models\Partner;
-use App\Models\PaymentMethod;
 use App\Models\ProviderAvailabilityData;
 use App\Models\ProviderData;
 use App\Models\Refund;
@@ -75,10 +74,12 @@ class CreditNotesController extends Controller
                 $partner = Partner::where('zoho_cust_id', Session::get('loginId'))->first();
                 $availability_data = ProviderAvailabilityData::where('zoho_cust_id', Session::get('loginId'))->first();
                 $company_info = ProviderData::where('zoho_cust_id', Session::get('loginId'))->first();
-                $paymentmethod = PaymentMethod::where('zoho_cust_id', $partner->zoho_cust_id)->first();
+                // if ($availability_data === null || $company_info === null) {
+                //     $showModal = true;
+                // }
 
 
-                return view('partner.creditnotes', compact('creditnotes', 'showModal', 'availability_data', 'company_info', 'paymentmethod'));
+                return view('partner.creditnotes', compact('creditnotes', 'showModal', 'availability_data', 'company_info'));
             } catch (Exception $e) {
 
                 return redirect('/logout')->with('fail', 'You are logged out! Try to login again.');

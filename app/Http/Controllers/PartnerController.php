@@ -7,11 +7,9 @@ use App\Mail\CreateSubscription;
 use App\Mail\Email;
 use Illuminate\Http\Request;
 use App\Models\AccessToken;
-use App\Models\AddOn;
 use App\Models\Admin;
 use App\Models\AffiliateId;
 use App\Models\Affiliates;
-use App\Models\BudgetCapSettings;
 use App\Models\Clicks;
 use App\Models\CreditNotes;
 use App\Models\Partner;
@@ -26,7 +24,6 @@ use App\Models\Plans;
 use App\Models\ProviderAvailabilityData;
 use App\Models\ProviderData;
 use App\Models\Refund;
-use App\Models\SelectedPlan;
 use App\Models\Subscriptions;
 use Carbon\Carbon;
 use PDF;
@@ -43,11 +40,8 @@ use League\Csv\Writer;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Aws\S3\S3Client;
 use Aws\Exception\AwsException;
-use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
-use SplTempFileObject;
-use DateTime;
 
 class PartnerController extends Controller
 {
@@ -56,6 +50,7 @@ class PartnerController extends Controller
 
         $request->validate([
             'company_name' => 'required|string',
+            'advertiser_id' => 'required|string',
             'first_name' => 'required|string',
             'last_name' => 'required|string',
             'email' => 'required|string',
@@ -85,11 +80,10 @@ class PartnerController extends Controller
                 return back()->with('fail', 'Email already exists');
             }
 
-            if ($this->partnerAdvertiserIdExists($request->advertiser_id)) {
-                return back()->with('fail', 'Partner with same Advertiser Id already exists');
+            if ($this->partnerIdExists($request->advertiser_id)) {
+
+                return back()->with('fail', 'Partner with same affiliate ID and advertiser ID already exists');
             }
-
-
 
             $response = $this->createPartnerInZoho($request, $access_token, $partner_url);
 
@@ -128,9 +122,10 @@ class PartnerController extends Controller
         return PartnerUsers::where('email', $email)->exists();
     }
 
-    private function partnerAdvertiserIdExists($advertiser_id)
+    private function partnerIdExists($isp_advertiser_id)
     {
-        return Partner::where('isp_advertiser_id', $advertiser_id)->exists();
+        return Partner::where('isp_advertiser_id', $isp_advertiser_id)
+            ->exists();
     }
 
     private function getAccessToken()
@@ -157,9 +152,6 @@ class PartnerController extends Controller
                     "first_name" => $request->first_name,
                     "last_name" => $request->last_name,
                     "email" => $request->email,
-                    "can_add_bank_account" =>  true,
-                    "ach_supported" => true,
-                    "can_add_card" => true,
                     "company_name" => $request->company_name,
                     "billing_address" => [
                         "attention" => $request->first_name . " " . $request->last_name,
@@ -188,7 +180,7 @@ class PartnerController extends Controller
                         ],
                         [
                             "label" => "isp_advertiser_id",
-                            "value" => null,
+                            "value" => $request->advertiser_id,
                         ],
                         [
                             "label" => "isp_tax_number",
@@ -210,11 +202,11 @@ class PartnerController extends Controller
             return json_decode($response);
         } catch (\GuzzleHttp\Exception\RequestException $e) {
 
-            \Log::error('Guzzle HTTP Exception: ' . $e->getMessage());
+            Log::error('Guzzle HTTP Exception: ' . $e->getMessage());
             return null;
         } catch (\Exception $e) {
 
-            \Log::error('Exception: ' . $e->getMessage());
+            Log::error('Exception: ' . $e->getMessage());
             return null;
         }
     }
@@ -228,6 +220,10 @@ class PartnerController extends Controller
             return back()->with('fail', 'Email already exists');
         }
 
+        if ($this->partnerIdExists($request->affiliate_id, $request->advertiser_id)) {
+
+            return back()->with('fail', 'Partner with same affiliate ID and advertiser ID already exists');
+        }
 
         $access_token = $this->getAccessToken();
 
@@ -306,7 +302,6 @@ class PartnerController extends Controller
         $partner->company_name = $zoho_partner->company_name;
         $partner->isp_advertiser_id = $request->advertiser_id;
         $partner->tax_number = $request->tax_number;
-        $partner->payment_gateway = "stripe";
         $partner->status = "Invited";
         $partner->save();
 
@@ -413,75 +408,6 @@ class PartnerController extends Controller
         return response()->json($invoice);
     }
 
-    private function getPartnerData($partnerId)
-    {
-        $partner = Partner::where('id', $partnerId)->first();
-
-        $subscription = Subscriptions::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-        $availability_data = ProviderAvailabilityData::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-        $company_info = ProviderData::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-        $paymentmethod = PaymentMethod::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-        $budget_cap = BudgetCapSettings::where('partner_id', $partner->id)->first();
-
-        if ($availability_data === null) {
-            session(['modal_shown' => true]);
-        }
-
-        $partner_plans = $partner->selected_plans ?? null;
-        $selected_partner_plans = json_decode($partner_plans);
-        $selected_plans = SelectedPlan::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-
-        if ($selected_plans && $selected_partner_plans) {
-            $selected_plan_id = $selected_plans->plan_id;
-            $plans = Plans::where('price', '!=', '0')
-                ->whereIn('plans.plan_id', $selected_partner_plans)
-                ->where('plan_id', '!=', $selected_plan_id)
-                ->get();
-        } else {
-            $selected_plan_id = null;
-            $plans = Plans::where('price', '!=', '0')->get();
-        }
-
-        $selected_plan = Plans::where('plan_id', $selected_plan_id)->first();
-
-        if ($subscription) {
-            $selected_plan = Plans::where('plan_id', $subscription->plan_id)->first();
-        }
-
-
-        $currentPlanData = $this->getCurrentPlanData($selected_plan, $budget_cap, $subscription);
-
-
-        return compact('partner', 'subscription', 'availability_data', 'selected_plan_id', 'company_info', 'selected_partner_plans', 'paymentmethod', 'budget_cap', 'selected_plan', 'plans', 'currentPlanData');
-    }
-
-    private function getCurrentPlanData($selected_plan, $budget_cap, $subscription)
-    {
-
-
-        $currentPlan = Plans::where('plan_id', optional($selected_plan)->plan_id)->first();
-        $addon = $currentPlan ? AddOn::where('plan_id', $currentPlan->plan_id)->first() : null;
-        $currentAddon = optional($subscription)->addon ? $addon : null;
-
-        $currentPlanType = strpos(optional($currentPlan)->plan_code, 'cpc') !== false ? 'cpc' : 'flat';
-
-        $budgetLimit = $currentPlanType === 'flat' ?  (optional($currentAddon)->addon_price + optional($currentPlan)->price) : null;
-        $clicksLimit = $currentPlanType === 'flat' ?  (optional($currentAddon)->max_clicks + optional($currentPlan)->max_clicks) : null;
-
-        if ($budget_cap) {
-            $currentPlanType = $budget_cap->plan_type;
-        }
-
-        return [
-            'budgetLimit' => $budgetLimit,
-            'clicksLimit' => $clicksLimit,
-            'currentPlan' => $currentPlan,
-            'currentAddon' => $currentAddon,
-            'currentPlanType' => $currentPlanType,
-
-        ];
-    }
-
     public function viewPartnerOverview()
     {
         $id = Route::getCurrentRoute()->id;
@@ -489,6 +415,10 @@ class PartnerController extends Controller
         $partner = Partner::where('id', $id)->first();
 
         $partner_address = PartnerAddress::where('zoho_cust_id', $partner->zoho_cust_id)->first();
+
+        $paymentmethod = PaymentMethod::where('zoho_cust_id', $partner->zoho_cust_id)->first();
+
+        $subscription = Subscriptions::where('zoho_cust_id', $partner->zoho_cust_id)->where('status', 'live')->first();
 
         $primary_user = PartnerUsers::where('zoho_cust_id', $partner->zoho_cust_id)->where('is_primary', true)->first();
 
@@ -502,49 +432,14 @@ class PartnerController extends Controller
 
         $remaining_affiliates = Affiliates::whereNotIn('id', $affiliate_id)
             ->get(['*']);
-        $partnerData = $this->getPartnerData($partner->id);
 
-        $payment_gateway = $partner->payment_gateway;
-
-        $tune_links = null;
-
-        $company_info = ProviderData::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-
-        if ($company_info) {
-            $tune_links = json_decode($company_info->tune_link, true);
-        }
-
-
-
-        return view('admin/view/overview', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'availability_data' => $partnerData['availability_data'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'plans' => $partnerData['plans'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'partner_address' => $partner_address,
-            'payment_gateway' => $payment_gateway,
-            'users' => $users,
-            'primary_user' => $primary_user,
-            'isp_affiliates' => $isp_affiliates,
-            'remaining_affiliates' => $remaining_affiliates,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-            'tune_links' => $tune_links,
-        ]);
+        return view('admin/view/overview', compact('partner', 'partner_address', 'paymentmethod', 'subscription', 'users', 'primary_user', 'isp_affiliates', 'remaining_affiliates'));
     }
 
     public function viewPartnerSubscriptions()
     {
         $id = Route::getCurrentRoute()->id;
         $partner = Partner::where('id', $id)->first();
-        $partner_plans = $partner->selected_plans ?? null;
-        $selected_partner_plans = json_decode($partner_plans);
         $plans_for_update = null;
         $subscriptions = DB::table('subscriptions')
             ->join('plans', 'subscriptions.plan_id', '=', 'plans.plan_id')
@@ -555,8 +450,10 @@ class PartnerController extends Controller
         $subscription = Subscriptions::where('zoho_cust_id', '=', $partner->zoho_cust_id)->first();
 
         if ($subscription) {
-            $plans_for_update = Plans::where('plan_id', '!=', $subscription->plan_id)->whereIn('plans.plan_id', $selected_partner_plans)->where('price', '!=', '0')->get();
+            $plans_for_update = Plans::where('plan_id', '!=', $subscription->plan_id)->where('price', '!=', '0')->get();
         }
+
+        $plans = Plans::where('price', '!=', '0')->get();
 
 
         $availability_data = ProviderAvailabilityData::where('zoho_cust_id', $partner->zoho_cust_id)->first();
@@ -566,25 +463,8 @@ class PartnerController extends Controller
         if ($availability_data === null || $company_info === null) {
             $showModal = true;
         }
-        $partnerData = $this->getPartnerData($partner->id);
 
-        return view('admin/view/subscriptions', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'availability_data' => $partnerData['availability_data'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'plans' => $partnerData['plans'],
-            'subscriptions' => $subscriptions,
-            'plans_for_update' => $plans_for_update,
-            'showModal' => $showModal,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/subscriptions', compact('partner', 'subscriptions', 'plans', 'plans_for_update', 'availability_data', 'company_info', 'showModal'));
     }
 
     public function viewPartnerCreditNotes(Request $request)
@@ -650,25 +530,8 @@ class PartnerController extends Controller
         }
 
 
-        $partnerData = $this->getPartnerData($partner->id);
 
-        return view('admin/view/creditnotes', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'availability_data' => $partnerData['availability_data'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'plans' => $partnerData['plans'],
-            'creditnotes' => $creditnotes,
-            'totalCount' => $totalCount,
-            'plan' => $plan,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/creditnotes', compact('partner', 'creditnotes', 'totalCount', 'plan'));
     }
 
 
@@ -715,25 +578,9 @@ class PartnerController extends Controller
             ->orderByDesc('invoice_number')
             ->get();
 
-        $partnerData = $this->getPartnerData($partner->id);
+        $subscription = Subscriptions::where('zoho_cust_id', $partner->zoho_cust_id)->first();
 
-        return view('admin/view/invoices', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'availability_data' => $partnerData['availability_data'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'plans' => $partnerData['plans'],
-            'invoices_for_update' => $invoices_for_update,
-            'totalCount' => $totalCount,
-            'invoices' => $invoices,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/invoices', compact('partner', 'invoices', 'totalCount', 'subscription', 'invoices_for_update'));
     }
 
     public function viewPartnerRefunds(Request $request)
@@ -768,24 +615,7 @@ class PartnerController extends Controller
 
         $refunds = $query->orderByDesc('created_at')->paginate($perPage);
 
-        $partnerData = $this->getPartnerData($partner->id);
-
-        return view('admin/view/refunds', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'availability_data' => $partnerData['availability_data'],
-            'company_info' => $partnerData['company_info'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'plans' => $partnerData['plans'],
-            'refunds' => $refunds,
-            'totalCount' => $totalCount,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/refunds', compact('partner', 'refunds', 'totalCount'));
     }
 
     public function viewPartnerProviderData(Request $request)
@@ -828,31 +658,9 @@ class PartnerController extends Controller
 
         $totalCount = DB::table('provider_availability_data')->where('zoho_cust_id', $zohoCustId)->count();
 
-        $partnerData = $this->getPartnerData($partner->id);
 
-        $admins = Admin::all();
-
-        return view('admin/view/provider-data', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'plans' => $partnerData['plans'],
-            'data' => $data,
-            'totalCount' => $totalCount,
-            'availability_data' => $availability_data,
-            'admins' => $admins,
-            'url' => $url,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/provider-data', compact('partner', 'data', 'availability_data', 'totalCount', 'url'));
     }
-
-
 
     public function generatePresignedUrl($objectKey)
     {
@@ -871,21 +679,20 @@ class PartnerController extends Controller
 
             return $presignedUrl;
         } catch (AwsException $e) {
-            \Log::error('Error generating presigned URL: ' . $e->getMessage());
+            Log::error('Error generating presigned URL: ' . $e->getMessage());
             return null;
         }
     }
 
-
-    public function viewPartnerSelectedPlans()
+    public function viewPartnerSelectedPlans(Request $request)
     {
         $id = Route::getCurrentRoute()->id;
         $partner = Partner::where('id', $id)->first();
         $zohoCustId = $partner->zoho_cust_id;
         $partner_plans = $partner->selected_plans ?? null;
         $selected_plans = json_decode($partner_plans);
-        $plans1 = Plans::where('price', '!=', 0)->get();
-        $plans1 = $plans1->sortBy('price')->values();
+        $plans = Plans::where('price', '!=', 0)->get();
+        $plans = $plans->sortBy('price')->values();
         $subscriptionlive = Subscriptions::where('zoho_cust_id', '=',  $zohoCustId)
             ->where('status', '=', 'live')
             ->first();
@@ -897,55 +704,8 @@ class PartnerController extends Controller
             $current_plan = null;
             $is_enterprise_plan = null;
         }
-        $partnerData = $this->getPartnerData($partner->id);
-
-        $selected_plan = Plans::where('plan_id', $partnerData['selected_plan_id'])->first();
-
-        $cpc_plan = $this->isCpcPlan($selected_plans);
-
-
-
-
-        return view('admin/view/selected-plan', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'company_info' => $partnerData['company_info'],
-            'availability_data' => $partnerData['availability_data'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'plans' => $partnerData['plans'],
-            'plans1' => $plans1,
-            'selected_plan' => $selected_plan,
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'selected_plans' => $selected_plans,
-            'cpc_plan' => $cpc_plan,
-            'current_plan' => $current_plan,
-            'is_enterprise_plan' => $is_enterprise_plan,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-        ]);
+        return view('admin/view/selected-plan', compact('partner', 'plans', 'selected_plans', 'current_plan', 'is_enterprise_plan'));
     }
-
-    private function isCpcPlan($selected_plans)
-    {
-        $numericValues = null;
-        if ($selected_plans) {
-            $numericValues = array_filter($selected_plans, 'is_numeric');
-        }
-
-        if (!empty($numericValues)) {
-            $sample_selected_plan_id = reset($numericValues);
-            $sample_selected_plan = Plans::where('plan_id', $sample_selected_plan_id)->first();
-            return strpos($sample_selected_plan->plan_code, 'cpc') !== false;
-        }
-
-
-        return false;
-    }
-
-
 
     public function addSelectedPlans(Request $request)
     {
@@ -954,8 +714,7 @@ class PartnerController extends Controller
         $jsonData = json_encode($selectedOptions);
         $partner->selected_plans =  $jsonData;
         $partner->save();
-        Session::flash('success', 'Selected Plans added Successfully!');
-        return  redirect()->back();
+        return back()->with('success', 'Selected plans added successfully');
     }
 
     public function noSelectedPlans()
@@ -972,426 +731,152 @@ class PartnerController extends Controller
         return view('partner/no-selected-plans', compact('showModal'));
     }
 
-
     public function viewPartnerClicksData(Request $request)
     {
-        $id = Route::getCurrentRoute()->parameter('id');
-        $partner = Partner::findOrFail($id);
-        $partner_plans = $partner->selected_plans ?? null;
-
-        $zohoCustId = $partner->zoho_cust_id;
-        $partnerAffiliateIds = PartnersAffiliates::where('partner_id', $partner->id)->pluck('id');
-        $filter = $request->input('filter', 'mtd');
-        $dataSplit = $request->input('data_split', 'daily');
-        $now = Carbon::now();
-
-        if ($filter === 'custom') {
-            $dateFrom = $request->has('date_from') ? Carbon::parse($request->get('date_from')) : null;
-            $dateTo = $request->has('date_to') ? Carbon::parse($request->get('date_to')) : null;
 
 
-            $formattedDateFrom = $dateFrom->format('y-m-d H:i:s');
-            $formattedDateTo = $dateTo->endOfDay()->format('y-m-d H:i:s');
-        } else {
-            [$dateFrom, $dateTo] = $this->getDateRange($filter, $request, $now);
+        $id = Route::getCurrentRoute()->id;
+        $partner = Partner::where('id', $id)->first();
+        $affiliate_id = PartnersAffiliates::where('partner_id', $partner->id)->pluck('affiliate_id');
+        $affiliates = Affiliates::whereIn('id', $affiliate_id)->get();
+        $values = [];
+
+        foreach ($affiliates as $affiliate) {
+            array_push($values, $affiliate->isp_affiliate_id . "(" . $affiliate->domain_name . ")");
         }
 
-        //dd($dateFrom);
-        $query = DB::table('clicks as c')
-            ->whereIn('c.partners_affiliates_id', $partnerAffiliateIds);
+        $partnerId = $partner->zoho_cust_id;
 
-        if (isset($formattedDateFrom) && isset($formattedDateTo)) {
-            $query->whereBetween('c.click_ts', [$formattedDateFrom, $formattedDateTo]);
-        } else {
-            $query->whereBetween('c.click_ts', [$dateFrom, $dateTo]);
+        $affiliateIdsArray = [''];
+
+        $affiliate_ids = $request->input('affiliate_ids', []);
+
+
+        if ($affiliate_ids) {
+            $affiliate_array_value = $affiliate_ids[0];
+            $affiliate_value = explode(',', $affiliate_array_value);
+            $values = array_unique($affiliate_value);
+        }
+
+        if ($affiliate_ids === []) {
+            $partneraffiliateIds = PartnersAffiliates::where('partner_id', $partner->id)->pluck('id');
+        } else if ($affiliate_ids[0] === null) {
+            $partneraffiliateIds = [];
         }
 
 
-        $chartData = $this->getChartData($query, $dataSplit);
 
-        $subscription = Subscriptions::where('zoho_cust_id', $zohoCustId)->first();
+        if ($affiliate_ids) {
+            if ($affiliate_ids[0] !== null) {
+                $affiliateIds = $request->affiliate_ids[0];
 
-        $totalCost = $invoicePace = $clicksPace = 0;
+                $pattern = '/(\d+)\(/';;
 
-        $metrics = DB::table('clicks as c')
-            ->leftJoin('clicks_conversions as cc', 'cc.click_id', '=', 'c.id')
-            ->leftJoin('partners_affiliates as pa', 'pa.id', '=', 'c.partners_affiliates_id')
-            ->leftJoin('partners as p', 'p.id', '=', 'pa.partner_id')
-            ->whereIn('c.partners_affiliates_id', $partnerAffiliateIds)
-            ->whereBetween('c.click_ts', [$dateFrom, $dateTo])
-            ->select(
-                DB::raw('COUNT(c.id) as total_clicks'),
-                DB::raw('COUNT(cc.id) as total_conversions'),
-                DB::raw('
-                    CASE 
-                        WHEN COUNT(c.id) = 0 THEN 0
-                        ELSE (COUNT(cc.id) / COUNT(c.id)) * 100 
-                    END as conversion_rate
-                ')
-            )
-            ->groupBy('p.id')
-            ->first();
+                preg_match_all($pattern, $affiliateIds, $matches);
 
-        if ($metrics) {
+                $affiliateIdsArray = $matches[1];
 
-            if ($subscription) {
+                $affiliate = Affiliates::whereIn('isp_affiliate_id', $affiliateIdsArray)->pluck('id');
 
-                $plan = Plans::where('plan_id', $subscription->plan_id)->where('price', '!=', 0)->first();
-
-                if ($plan) {
-
-                    $dateFrom = Carbon::parse($dateFrom);
-
-                    $dateTo = Carbon::parse($dateTo);
-
-                    $startOfMonth = $dateFrom->format('Y-m-d');
-
-                    $todayDate = $dateTo->format('Y-m-d');
-
-                    $todayDayNumber = $dateTo->format('j');
-
-                    $totalDaysInMonth = $dateTo->daysInMonth;
-
-                    $totalClicksTillDate = $metrics->total_clicks;
-
-                    $perDayClicks = ($todayDayNumber > 0) ? $totalClicksTillDate / $todayDayNumber : 0;
-
-                    $metrics->today_number = $todayDayNumber;
-
-                    $metrics->is_cpc = $plan->is_cpc;
-
-                    if ($plan->is_cpc) {
-
-                        $totalCost = $totalClicksTillDate * $plan->price;
-
-                        $invoicePace = $perDayClicks * $totalDaysInMonth * $plan->price;
-
-                        $clicksPace = $perDayClicks * $totalDaysInMonth;
-                    } else {
-
-                        $totalCost = $plan->price;
-
-                        $invoicePace = $perDayClicks * $totalDaysInMonth * ($plan->price / $plan->max_clicks);
-
-                        $clicksPace = $perDayClicks * $totalDaysInMonth;
-
-                        $metrics->clicks_limit = $plan->max_clicks;
-                    }
-
-                    $metrics->per_day_clicks = $perDayClicks;
-
-                    $metrics->total_cost = $totalCost;
-
-                    $metrics->invoice_pace = $invoicePace;
-
-                    $metrics->clicks_pace = $clicksPace;
-
-                    $metrics->plan_price = $plan->price;
-                }
+                $partneraffiliateIds = PartnersAffiliates::whereIn('affiliate_id', $affiliate)
+                    ->where('partner_id', $partner->id)->pluck('id');
             }
-        } else {
-
-            $metrics = null;
         }
 
-        $partnerData = $this->getPartnerData($partner->id);
 
-        $metricsData = $metrics ? $this->getMetricsData($metrics, $partnerData['budget_cap']) : null;
+        $query = Clicks::whereIn('partners_affiliates_id', $partneraffiliateIds);
 
+        $now = Carbon::now();
+        $filter = $request->input('filter', 'last_12_months');
+        $dataSplit = $request->input('data_split', 'monthly');
+        $dateFrom = $request->get('date_from');
+        $dateTo = $request->get('date_to');
 
-        return view('admin.view.clicks-data', [
-            'partner' => $partnerData['partner'],
-            'subscription' => $partnerData['subscription'],
-            'company_info' => $partnerData['company_info'],
-            'paymentmethod' => $partnerData['paymentmethod'],
-            'availability_data' => $partnerData['availability_data'],
-            'budget_cap' => $partnerData['budget_cap'],
-            'selected_plan' => $partnerData['selected_plan'],
-            'selected_partner_plans' => $partnerData['selected_partner_plans'],
-            'plans' => $partnerData['plans'],
-            'metrics' => $metrics,
-            'chartData' => $chartData,
-            'dateFrom' => $dateFrom,
-            'dateTo' => $dateTo,
-            'totalCost' => $totalCost,
-            'partner_plans' => $partner_plans,
-            'currentPlanType' => $partnerData['currentPlanData']['currentPlanType'],
-            'currentPlan' => $partnerData['currentPlanData']['currentPlan'],
-            'currentAddon' => $partnerData['currentPlanData']['currentAddon'],
-            'budgetLimit' => $partnerData['currentPlanData']['budgetLimit'],
-            'clicksLimit' => $partnerData['currentPlanData']['clicksLimit'],
-            'metricsData' => $metricsData,
-        ]);
-    }
-
-
-
-    private function getMetricsData($metrics, $budget_cap)
-    {
-        $plan_price = $metrics->plan_price ?? 0;
-
-        $total_clicks_till_date = $metrics->total_clicks ?? 0;
-
-        $per_day_clicks = $metrics->per_day_clicks ?? 0;
-
-        $estimated_date_budget_cap_hit = '';
-
-        if ($budget_cap) {
-
-            $budget_limit = $budget_cap->cost_limit ?? 0;
-
-            $budget_cap_hit = isset($metrics->invoice_pace) && $metrics->invoice_pace > $budget_limit;
-        } else {
-
-            $budget_limit = 0;
-            $budget_cap_hit = false;
+        if ($dateFrom) {
+            $query->where('click_ts', '>=', Carbon::parse($dateFrom));
+        }
+        if ($dateTo) {
+            $query->where('click_ts', '<=', Carbon::parse($dateTo));
         }
 
-        if (!empty($metrics->is_cpc)) {
-
-            $click_limit = $plan_price > 0 ? number_format($budget_limit / $plan_price, 0, '.', '') : 0;
-        } else {
-            $click_limit = $budget_cap->click_limit ?? 0;
-        }
-
-        $remaining_clicks = $click_limit - $total_clicks_till_date;
-
-        $remaining_days = $per_day_clicks > 0 ? ceil($remaining_clicks / $per_day_clicks) : 0;
-
-        $remaining_days = max(0, $remaining_days);
-
-        $today = new DateTime();
-
-        $today->modify("+$remaining_days days");
-
-        $estimated_date_budget_cap_hit = $today->format('d-M-Y');
-
-        $clicks_pace = $metrics->clicks_pace ?? 0;
-
-        $metricsData = [
-            [
-                'value' => $metrics->total_clicks ?? 0,
-                'label' => 'Total Clicks',
-                'class' => 'text-center',
-                'bg_class' => '',
-                'id' => 'totalClicks',
-            ],
-            [
-                'value' => '$' . ($metrics->total_cost ?? 0),
-                'label' => 'Total Cost',
-                'class' => 'text-center',
-                'bg_class' => '',
-                'id' => 'totalCost',
-            ],
-            [
-                'value' => $metrics->total_conversions ?? 0,
-                'label' => 'Total Conversions',
-                'class' => 'text-center',
-                'bg_class' => '',
-                'id' => 'totalConversions',
-            ],
-            [
-                'value' => number_format($metrics->conversion_rate ?? 0, 2) . '%',
-                'label' => 'Conversion Rate',
-                'class' => 'text-center',
-                'bg_class' => '',
-                'id' => 'conversionRate',
-            ],
-
-            [
-                'value' => number_format(round($clicks_pace), 0, '.', ''),
-                'label' => 'Clicks Pace (MTD)',
-                'class' => 'text-center',
-                'bg_class' => $budget_cap_hit && $budget_limit !== '0' && $budget_limit  ? 'bg-danger text-white' : '',
-                'id' => 'clicksPace',
-                'additional_info' => $budget_limit !== '0' && $budget_limit ? [
-                    'type' => $budget_cap->plan_type ?? 'Unknown',
-                    'limit' => $click_limit,
-                    'label' => 'Click Cap',
-                    'est_cap_hit_value' => $estimated_date_budget_cap_hit,
-                    'est_cap_hit_label' => "Est Cap Hit Date"
-                ] : null,
-            ],
-            [
-                'value' => '$' . number_format(round($metrics->invoice_pace ?? 0), 0, '.', ''),
-                'label' => 'Invoice Pace (MTD)',
-                'class' => 'text-center',
-                'id' => 'invoicePace',
-                'bg_class' => $budget_cap_hit && $budget_limit !== '0' && $budget_limit ? 'bg-danger text-white' : '',
-                'additional_info' => $budget_limit !== '0' && $budget_limit ? [
-                    'type' => $budget_cap->plan_type ?? 'Unknown',
-                    'limit' => '$' . ($budget_cap->cost_limit ?? 0),
-                    'label' => 'Budget Cap',
-                    'est_cap_hit_value' => $estimated_date_budget_cap_hit,
-                    'est_cap_hit_label' => "Est Cap Hit Date"
-                ] : null,
-            ],
-        ];
-        //dd($budget_limit);
-        return $metricsData;
-    }
-
-
-    private function getDateRange($filter, $request, $now)
-    {
         switch ($filter) {
-            case 'mtd':
-                $dateFrom = $now->copy()->startOfMonth()->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->subDay()->endOfDay()->format('y-m-d H:i:s');
-                break;
             case 'last_12_months':
-                $dateFrom = $now->copy()->subMonths(12)->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subMonths(12));
                 break;
             case 'last_6_months':
-                $dateFrom = $now->copy()->subMonths(6)->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subMonths(6));
                 break;
             case 'last_3_months':
-                $dateFrom = $now->copy()->subMonths(3)->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subMonths(3));
                 break;
             case 'last_1_month':
-                $dateFrom = $now->copy()->subMonth()->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
-                break;
-            case 'last_month':
-                $dateFrom = $now->copy()->subMonth()->startOfMonth()->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->subMonth()->endOfMonth()->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subMonth());
                 break;
             case 'last_7_days':
-                $dateFrom = $now->copy()->subDays(7)->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
-                break;
-            case '-':
-                $dateFrom = Carbon::parse($request->get('date_from'))->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = Carbon::parse($request->get('date_to'))->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subDays(7));
                 break;
             default:
-                $dateFrom = $now->copy()->subMonths(12)->startOfDay()->format('y-m-d H:i:s');
-                $dateTo = $now->copy()->endOfDay()->format('y-m-d H:i:s');
+                $query->where('click_ts', '>=', $now->copy()->subMonths(12));
                 break;
         }
-        return [$dateFrom, $dateTo];
-    }
 
-
-
-    private function getChartData($query, $dataSplit)
-    {
         $chartData = [];
 
-        if ($dataSplit === 'daily') {
-
-            $results = $query->select(
-                DB::raw('DATE(c.click_ts) as date'),
-                DB::raw('COUNT(c.id) as total_clicks'),
-                'a.domain_name as domain'
-            )
-                ->leftJoin('partners_affiliates as pa', 'pa.id', '=', 'c.partners_affiliates_id')
-                ->leftJoin('affiliates as a', 'a.id', '=', 'pa.affiliate_id')
-                ->groupBy(DB::raw('DATE(c.click_ts)'), 'a.domain_name')
-                ->orderBy(DB::raw('DATE(c.click_ts)'), 'asc')
+        if ($dataSplit == 'daily') {
+            $results = $query->select(DB::raw('DATE(click_ts) as date, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('DATE(click_ts)'))
+                ->orderBy(DB::raw('DATE(click_ts)'), 'asc')
                 ->get();
-            //dd($results);
-            $domainClicks = [];
 
             foreach ($results as $result) {
-
                 $formattedDate = Carbon::parse($result->date)->format('d M Y');
-
-                if (!isset($domainClicks[$formattedDate])) {
-
-                    $domainClicks[$formattedDate] = [];
-                }
-                $domainClicks[$formattedDate][$result->domain] = $result->total_clicks;
-            }
-
-            foreach ($domainClicks as $date => $domains) {
                 $chartData[] = [
-                    'date' => $date,
-                    'total_clicks' => array_sum($domains),
-                    'domain_clicks' => $domains,
+                    'click_date' => $formattedDate,
+                    'click_count' => $result->total_clicks,
                 ];
             }
-        } elseif ($dataSplit === 'weekly') {
-
-            // Adjust the query to group by week (year and week number)
-            $results = $query->select(
-                DB::raw('YEAR(c.click_ts) as year'), // Extract the year
-                DB::raw('WEEK(c.click_ts) as week'), // Extract the week number
-                DB::raw('COUNT(c.id) as total_clicks'),
-                DB::raw('MIN(click_ts) as from_date'),
-                DB::raw(' MAX(click_ts) as to_date'), // Count clicks
-                'a.domain_name as domain' // Get domain name
-            )
-                ->leftJoin('partners_affiliates as pa', 'pa.id', '=', 'c.partners_affiliates_id')
-                ->leftJoin('affiliates as a', 'a.id', '=', 'pa.affiliate_id')
-                ->groupBy(DB::raw('YEAR(c.click_ts)'), DB::raw('WEEK(c.click_ts)'), 'a.domain_name') // Group by year and week
-                ->orderBy(DB::raw('YEAR(c.click_ts)'), 'asc') // Order by year and week
-                ->orderBy(DB::raw('WEEK(c.click_ts)'), 'asc') // Ensure proper weekly ordering
+        } elseif ($dataSplit == 'weekly') {
+            $results = $query->select(DB::raw('YEAR(click_ts) as year, WEEK(click_ts) as week, MIN(click_ts) as from_date, MAX(click_ts) as to_date, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('YEAR(click_ts), WEEK(click_ts)'))
+                ->orderBy(DB::raw('YEAR(click_ts), WEEK(click_ts)'), 'asc')
                 ->get();
-
-            $domainClicks = [];
 
             foreach ($results as $result) {
                 $fromDate = Carbon::parse($result->from_date)->format('d M Y');
                 $toDate = Carbon::parse($result->to_date)->format('d M Y');
-
-                // Create a readable format for week by combining year and week number
-                $formattedWeek = $fromDate . ' to ' . $toDate;
-
-                if (!isset($domainClicks[$formattedWeek])) {
-                    $domainClicks[$formattedWeek] = [];
-                }
-                $domainClicks[$formattedWeek][$result->domain] = $result->total_clicks;
-            }
-
-            foreach ($domainClicks as $week => $domains) {
                 $chartData[] = [
-                    'date' => $week, // Use the formatted week
-                    'total_clicks' => array_sum($domains), // Sum up clicks for all domains
-                    'domain_clicks' => $domains, // List clicks per domain
+                    'click_date' => 'Week ' . $result->week . ', ' . $result->year . ' (' . $fromDate . ' to ' . $toDate . ')',
+                    'click_count' => $result->total_clicks,
                 ];
             }
         } else {
-
-            // Adjust the query to group by month and year, and format the date as "YYYY-MM"
-            $results = $query->select(
-                DB::raw('DATE_FORMAT(c.click_ts, "%Y-%m") as month_year'), // Format as "YYYY-MM" (e.g., "2024-01")
-                DB::raw('COUNT(c.id) as total_clicks'), // Count clicks
-                'a.domain_name as domain' // Get domain name
-            )
-                ->leftJoin('partners_affiliates as pa', 'pa.id', '=', 'c.partners_affiliates_id')
-                ->leftJoin('affiliates as a', 'a.id', '=', 'pa.affiliate_id')
-                ->groupBy(DB::raw('DATE_FORMAT(c.click_ts, "%Y-%m")'), 'a.domain_name') // Group by formatted "YYYY-MM"
-                ->orderBy(DB::raw('DATE_FORMAT(c.click_ts, "%Y-%m")'), 'asc') // Order by year and month
+            $results = $query->select(DB::raw('YEAR(click_ts) as year, MONTH(click_ts) as month, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('YEAR(click_ts), MONTH(click_ts)'))
+                ->orderBy(DB::raw('YEAR(click_ts), MONTH(click_ts)'), 'asc')
                 ->get();
-
-            $domainClicks = [];
-
             foreach ($results as $result) {
-
-                // The formatted month-year string will be like "2024-01"
-                $formattedMonth = \Carbon\Carbon::parse($result->month_year)->format('F Y'); // Convert to "January 2024"
-
-                if (!isset($domainClicks[$formattedMonth])) {
-                    $domainClicks[$formattedMonth] = [];
-                }
-                $domainClicks[$formattedMonth][$result->domain] = $result->total_clicks;
-            }
-
-            foreach ($domainClicks as $month => $domains) {
+                $formattedDate = Carbon::createFromDate($result->year, $result->month)->format('M Y');
                 $chartData[] = [
-                    'date' => $month, // Display "January 2024" or similar
-                    'total_clicks' => array_sum($domains), // Sum up clicks for all domains in that month
-                    'domain_clicks' => $domains, // List clicks per domain
+                    'click_date' => $formattedDate,
+                    'click_count' => $result->total_clicks,
                 ];
             }
         }
 
 
-        return $chartData;
+        $topN = $request->input('topN', 10);
+        $topZipCodes = $this->getTopZipCodes($partner->id, $filter, $topN);
+
+        $filterText = $this->getFilterText($filter);
+
+        if ($request->has('download')) {
+            $pdf = PDF::loadView('partner.clicks-report-pdf', compact('partner', 'chartData', 'topZipCodes', 'filterText', 'topN'));
+
+            return $pdf->download('clicks_report.pdf');
+        }
+
+
+        return view('admin/view/clicks-data', compact('partner', 'chartData', 'topZipCodes', 'filterText', 'topN', 'filter', 'dataSplit', 'affiliates', 'affiliateIdsArray', 'values'));
     }
 
     private function getTopZipCodes($partnerId, $filter, $topN)
@@ -1447,62 +932,109 @@ class PartnerController extends Controller
         }
     }
 
-    public function exportClicksReport($id, Request $request)
+    public function exportClicksReport(Request $request)
     {
-        $partner = Partner::findOrFail($id);
-        $zohoCustId = $partner->zoho_cust_id;
-        $partnerAffiliateIds = PartnersAffiliates::where('partner_id', $partner->id)->pluck('id');
-        //dd($request);
-        // Handle filter and date range
-        $filter = $request->input('filter', 'mtd');
-        $dataSplit = $request->input('data_split', 'daily');
+        $partnerId = Route::getCurrentRoute()->id;
+
+        $partner = Partner::where('id', $partnerId)->first();
+
+        if (!$partner) {
+            return back()->with('fail', 'Partner not found');
+        }
+
+        $affiliateIds = PartnersAffiliates::where('partner_id', $partner->id)->pluck('id');
+
+        $query = Clicks::whereIn('partners_affiliates_id', $affiliateIds);
 
         $now = Carbon::now();
+        $filter = $request->input('filter', 'last_12_months');
+        $dataSplit = $request->input('data_split', 'monthly');
 
-        if ($filter === 'custom') {
-            $dateFrom = $request->has('date_from') ? Carbon::parse($request->get('date_from')) : null;
-            $dateTo = $request->has('date_to') ? Carbon::parse($request->get('date_to')) : null;
-
-
-            $formattedDateFrom = $dateFrom->format('y-m-d H:i:s');
-            $formattedDateTo = $dateTo->endOfDay()->format('y-m-d H:i:s');
-        } else {
-            [$dateFrom, $dateTo] = $this->getDateRange($filter, $request, $now);
+        switch ($filter) {
+            case 'last_12_months':
+                $query->where('click_ts', '>=', $now->copy()->subMonths(12));
+                break;
+            case 'last_6_months':
+                $query->where('click_ts', '>=', $now->copy()->subMonths(6));
+                break;
+            case 'last_3_months':
+                $query->where('click_ts', '>=', $now->copy()->subMonths(3));
+                break;
+            case 'last_1_month':
+                $query->where('click_ts', '>=', $now->copy()->subMonth());
+                break;
+            case 'last_7_days':
+                $query->where('click_ts', '>=', $now->copy()->subDays(7));
+                break;
+            default:
+                $query->where('click_ts', '>=', $now->copy()->subMonths(12));
+                break;
         }
 
-        $query = DB::table('clicks as c')
-            ->whereIn('c.partners_affiliates_id', $partnerAffiliateIds);
-
-        if (isset($formattedDateFrom) && isset($formattedDateTo)) {
-            $query->whereBetween('c.click_ts', [$formattedDateFrom, $formattedDateTo]);
+        if ($dataSplit == 'daily') {
+            $results = $query->select(DB::raw('DATE(click_ts) as date, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('DATE(click_ts)'))
+                ->orderBy(DB::raw('DATE(click_ts)'), 'desc')
+                ->get();
+        } elseif ($dataSplit == 'weekly') {
+            $results = $query->select(DB::raw('YEAR(click_ts) as year, WEEK(click_ts) as week, MIN(click_ts) as from_date, MAX(click_ts) as to_date, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('YEAR(click_ts), WEEK(click_ts)'))
+                ->orderBy(DB::raw('YEAR(click_ts), WEEK(click_ts)'), 'desc')
+                ->get();
         } else {
-            $query->whereBetween('c.click_ts', [$dateFrom, $dateTo]);
+            $results = $query->select(DB::raw('YEAR(click_ts) as year, MONTH(click_ts) as month, COUNT(*) as total_clicks'))
+                ->groupBy(DB::raw('YEAR(click_ts), MONTH(click_ts)'))
+                ->orderBy(DB::raw('YEAR(click_ts), MONTH(click_ts)'), 'desc')
+                ->get();
         }
 
-        // Get chart data
-        $chartData = $this->getChartData($query, $dataSplit);
+        // $topN = $request->input('topN', 10);
+        // $topZipCodes = $query->select('intended_zip', DB::raw('COUNT(*) as total_clicks'))
+        //     ->groupBy('intended_zip')
+        //     ->orderByDesc('total_clicks')
+        //     ->take($topN)
+        //     ->get();
 
-        // Prepare the CSV output
-        $csv = Writer::createFromFileObject(new SplTempFileObject(), 'w+');
-        $csv->insertOne(['Date', 'Total Clicks', 'Domain Clicks']); // Column headers
+        $filterText = $this->getFilterText($filter);
 
-        // Add data rows to the CSV
-        foreach ($chartData as $data) {
-            $row = [$data['date'], $data['total_clicks']];
-            foreach ($data['domain_clicks'] as $domain => $clicks) {
-                $row[] = "$domain: $clicks"; // Format domain clicks
+        $response = new StreamedResponse(function () use ($results, $dataSplit, $filterText, $partner) {
+            $csv = Writer::createFromFileObject(new \SplTempFileObject());
+
+            // Write header
+            $csv->insertOne(['Clicks Report - ' . $filterText]);
+            if ($dataSplit == 'daily') {
+                $csv->insertOne(['Date', 'Total Clicks']);
+                foreach ($results as $result) {
+                    $formattedDate = Carbon::parse($result->date)->format('d M Y');
+                    $csv->insertOne([$formattedDate, $result->total_clicks]);
+                }
+            } elseif ($dataSplit == 'weekly') {
+                $csv->insertOne(['Week', 'Total Clicks']);
+                foreach ($results as $result) {
+                    $fromDate = Carbon::parse($result->from_date)->format('d M Y');
+                    $toDate = Carbon::parse($result->to_date)->format('d M Y');
+                    $csv->insertOne(['Week ' . $result->week . ', ' . $result->year . ' (' . $fromDate . ' to ' . $toDate . ')', $result->total_clicks]);
+                }
+            } else {
+                $csv->insertOne(['Month', 'Total Clicks']);
+                foreach ($results as $result) {
+                    $formattedDate = Carbon::createFromDate($result->year, $result->month)->format('M Y');
+                    $csv->insertOne([$formattedDate, $result->total_clicks]);
+                }
             }
-            $csv->insertOne($row);
-        }
 
-        $dateFrom = Carbon::parse($dateFrom);
-        $dateTo = Carbon::parse($dateTo);
+            // $csv->insertOne([]);
+            // $csv->insertOne(['Top Zip Codes']);
+            // $csv->insertOne(['Rank', 'Zip Code', 'Total Clicks']);
+            // foreach ($topZipCodes as $index => $zipCode) {
+            //     $csv->insertOne([$index + 1, $zipCode->intended_zip, $zipCode->total_clicks]);
+            // }
 
-        // Set CSV headers for download
-        $filename = $partner->company_name . '_clicks_report_' . $partner->id . '_' . $dateFrom->format('Y_m_d') . '_to_' . $dateTo->format('Y_m_d') . '.csv';
-        $response = new Response($csv->getContent());
-        $response->header('Content-Type', 'text/csv');
-        $response->header('Content-Disposition', 'attachment; filename="' . $filename . '"');
+            $csv->output($partner->company_name . '_clicks_report.csv');
+        });
+
+        $response->headers->set('Content-Type', 'text/csv');
+        $response->headers->set('Content-Disposition', 'attachment; filename="clicks_report.csv"');
 
         return $response;
     }
@@ -1518,7 +1050,6 @@ class PartnerController extends Controller
         } else {
             $token->getToken();
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
             return back()->with('fail', 'Kindly Try Again');
         }
         $partner_url = env('PARTNER_URL');
@@ -1606,10 +1137,8 @@ class PartnerController extends Controller
             $data = new ProviderData();
             $data->logo_image = $path . $filename;
             $data->landing_page_url = $request->landing_page_url;
-            $data->landing_page_url_spanish = $request->landing_page_url_spanish;
             $data->company_name = $request->company_name;
             $data->zoho_cust_id = $partner->zoho_cust_id;
-            $data->tune_link = $request->tune_link ?? NULL;
             $data->uploaded_by = $admin->admin_name . '(admin)';
             $data->save();
 
@@ -1730,7 +1259,7 @@ class PartnerController extends Controller
 
                 return redirect('/admin/view-partner/' . $partner->id . '/provider-data')->with('success', 'Provider Availability Data Uploaded Successfully');
             } catch (\Exception $e) {
-                \Log::error('Error processing CSV: ' . $e->getMessage());
+                Log::error('Error processing CSV: ' . $e->getMessage());
                 return back()->with('fail', 'Error processing CSV: ' . $e->getMessage());
             }
         }
@@ -1746,7 +1275,6 @@ class PartnerController extends Controller
         } else {
             $token->getToken();
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
             return back()->with('fail', 'Kindly Try Again');
         }
         $partner_url = env('PARTNER_URL');
@@ -1795,27 +1323,7 @@ class PartnerController extends Controller
             $partner->isp_advertiser_id = $request->advertiser_id;
             $partner->tax_number = $request->tax_number;
             $partner->id = $request->partner_id;
-            $partner->payment_gateway = $request->payment_gateway;
             $partner->save();
-
-            $company_info = ProviderData::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-
-            if ($request->tune_link) {
-
-                if ($company_info) {
-
-                    $tuneLinks = $request->tune_link;
-
-                    $tuneLinks = array_unique($tuneLinks);
-
-                    $company_info->tune_link = json_encode(array_values($tuneLinks));
-
-                    $company_info->save();
-                } else {
-
-                    return back()->with('fail', 'Partner have not uploaded the company info');
-                }
-            }
 
             return redirect('/admin/view-partner/' . $partner->id)->with('success', 'Partner updated successfully');
         } catch (GuzzleException $e) {
@@ -1850,7 +1358,6 @@ class PartnerController extends Controller
             $token->getToken();
 
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
         }
 
         $client = new \GuzzleHttp\Client();
@@ -1901,7 +1408,7 @@ class PartnerController extends Controller
             return back()->with('success', 'Subscription Mail sent successfully!');
         } catch (\Exception $e) {
 
-            \Log::error("Error sending subscription email: " . $e->getMessage());
+            Log::error("Error sending subscription email: " . $e->getMessage());
 
             return redirect('/admin/subscription')->with('fail', 'There was a problem sending the email. Please try again later.');
         }
@@ -1920,7 +1427,6 @@ class PartnerController extends Controller
             $token->getToken();
 
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
 
             return back()->with('fail', 'Kindly Try Again');
         }
@@ -1960,7 +1466,6 @@ class PartnerController extends Controller
             $token->getToken();
 
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
 
             return back()->with('fail', 'Kindly Try Again');
         }
@@ -2082,7 +1587,6 @@ class PartnerController extends Controller
             } else {
                 $token->getToken();
                 $token1 = AccessToken::latest('created_at')->first();
-                $access_token = $token1->access_token;
                 return back()->with('fail', 'Kindly Try Again');
             }
 
@@ -2180,7 +1684,6 @@ class PartnerController extends Controller
 
     public function associatePaymentMethod(AccessToken $token)
     {
-
         $id = Route::getCurrentRoute()->id;
         $partner = Partner::where('id', $id)->first();
         $app_url = env('APP_URL');
@@ -2190,8 +1693,6 @@ class PartnerController extends Controller
         } else {
             $token->getToken();
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
-            return back()->with('fail', 'Kindly Try Again');
         }
         $client = new \GuzzleHttp\Client();
 
@@ -2234,7 +1735,7 @@ class PartnerController extends Controller
                 return back()->with('success', 'Associate Payment Method Mail sent successfully!');
             } catch (\Exception $e) {
 
-                \Log::error("Error sending subscription email: " . $e->getMessage());
+                Log::error("Error sending subscription email: " . $e->getMessage());
 
                 return back()->with('fail', $e->getMessage());
             }
@@ -2268,7 +1769,6 @@ class PartnerController extends Controller
         } else {
             $token->getToken();
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
         }
 
         $client = new \GuzzleHttp\Client();
@@ -2351,7 +1851,6 @@ class PartnerController extends Controller
         } else {
             $token->getToken();
             $token1 = AccessToken::latest('created_at')->first();
-            $access_token = $token1->access_token;
         }
 
         $client = new \GuzzleHttp\Client();
@@ -2393,14 +1892,13 @@ class PartnerController extends Controller
             if ($existing_parent_refund) {
                 $refund->balance_amount = $existing_parent_refund->balance_amount -  $data->creditnote->refund_amount;
             } else {
-                $refund->balance_amount = round($invoice->invoice_items['price'], 2) -  $data->creditnote->refund_amount;
+                $refund->balance_amount = round($invoice->payment_made, 2) -  $data->creditnote->refund_amount;
             }
 
             $refund->refund_amount = $data->creditnote->refund_amount;
             $refund->zoho_cust_id = $invoice->zoho_cust_id;
             $refund->date = $data->date;
             $refund->description = $data->description;
-            $refund->status = $data->status;
             $refund->parent_payment_id = $data->autotransaction->parent_payment_id;
             $refund->status = $data->status;
             $refund->refund_mode = $data->refund_mode;
@@ -2418,43 +1916,5 @@ class PartnerController extends Controller
 
             return back()->with('fail', $response->message);
         }
-    }
-
-    public function updateLimit(Request $request)
-    {
-
-        $budget_cap = BudgetCapSettings::where('partner_id', $request->partner_id)->first();
-
-        if ($budget_cap === null) {
-            $budget_cap = new BudgetCapSettings();
-        }
-
-        $budget_cap->click_limit = $request->cost_limit / $request->plan_price;
-        if ($request->plan_type === "flat") {
-            $budget_cap->click_limit = $request->click_limit;
-        }
-        $budget_cap->cost_limit = $request->cost_limit;
-        $budget_cap->partner_id = $request->partner_id;
-        $budget_cap->plan_type = $request->plan_type;
-        $budget_cap->clicks_pace_toggle = $request->clicks_pace_toggle;
-        $budget_cap->invoice_pace_toggle = $request->invoice_pace_toggle;
-        $budget_cap->budget_cap_toggle = $request->budget_cap_toggle;
-        $budget_cap->save();
-        return back()->with('success', 'Budget Cap Settings Updated Successfully');
-    }
-
-
-    public function getPlans(Request $request)
-    {
-        $planType = $request->input('planType');  // 'flat' or 'cpc'
-
-        if ($planType === 'cpc') {
-            $plans = Plans::where('is_cpc', true)->where('price', '!=', 0)->get();  // Get CPC plans
-        } else {
-            $plans = Plans::where('is_cpc', false)->where('price', '!=', 0)->get(); // Get Flat plans
-        }
-
-        // Return the plans as JSON
-        return response()->json(['plans' => $plans]);
     }
 }

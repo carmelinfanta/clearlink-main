@@ -22,7 +22,7 @@ class FakeClicksTableSeeder extends Seeder
 
         $partner = DB::table('partners')
             ->select('id')
-            ->where('company_name', 'Socxo Local 7')
+            ->where('company_name', 'Medical Center 42352')
             ->first();
 
         if ($partner) {
@@ -33,7 +33,7 @@ class FakeClicksTableSeeder extends Seeder
                 ->toArray();
 
             $startDate = Carbon::createFromDate(2024, 1, 1);
-            $endDate = Carbon::createFromDate(2024, 12, 6);
+            $endDate = Carbon::createFromDate(2025, 1, 29);
 
             while ($startDate->lte($endDate)) {
 

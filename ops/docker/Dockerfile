@@ -27,9 +27,10 @@ RUN apk add --no-cache build-base libpng-dev \
 # PHPREDIS
 RUN git clone https://github.com/phpredis/phpredis.git /usr/src/php/ext/redis
 RUN docker-php-ext-install redis
+WORKDIR /app
 
 # COMPOSER AND NPM
-FROM base as build
+FROM base AS build
 WORKDIR /app
 COPY . ./
 #COPY composer.json composer.lock ./
@@ -55,7 +56,7 @@ ENTRYPOINT ["entrypoint.sh"]
 CMD ["start-fpm.sh"]
 
 # NODE SECTION
-FROM node:20-alpine3.18 as node
+FROM node:20-alpine3.18 AS node
 WORKDIR /app
 COPY package.json package-lock.json vite.config.js ./
 COPY public ./public

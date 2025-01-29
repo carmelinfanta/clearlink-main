@@ -68,12 +68,7 @@ class ClicksEmailAlertController extends Controller
             'timestamp' => now()->toDateTimeString(),
         ];
 
-        $admins = Admin::where('receive_mails', 'Yes')
-            ->whereHas('mailNotifications', function ($query) {
-                $query->where('clicks_alert_mail', true);
-            })
-            ->get();
-
+        $admins = Admin::where('receive_mails', 'Yes')->get();
         $admin_emailLogDetails = [];
 
         foreach ($admins as $admin) {

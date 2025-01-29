@@ -17,7 +17,6 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Http\Request;
 use App\Models\Partner;
 use App\Models\PartnerUsers;
-use App\Models\PaymentMethod;
 use App\Models\ProviderData;
 use App\Models\ProviderAvailabilityData;
 use Illuminate\Support\Facades\DB;
@@ -97,12 +96,11 @@ class ProviderDataController extends Controller
         $partner = Partner::where('zoho_cust_id', Session::get('loginId'))->first();
         $availability_data = ProviderAvailabilityData::where('zoho_cust_id', Session::get('loginId'))->first();
         $company_info = ProviderData::where('zoho_cust_id', Session::get('loginId'))->first();
-        $paymentmethod = PaymentMethod::where('zoho_cust_id', $partner->zoho_cust_id)->first();
 
         // if ($availability_data === null || $company_info === null) {
         //     $showModal = true;
         // }
-        return view('partner/provider-info', compact('aoa_data', 'totalCount', 's3_domain_url', 'showModal', 'availability_data', 'company_info', 'paymentmethod'));
+        return view('partner/provider-info', compact('aoa_data', 'totalCount', 's3_domain_url', 'showModal', 'availability_data', 'company_info'));
     }
 
     public function getProviderCompanyInfo()
@@ -133,15 +131,13 @@ class ProviderDataController extends Controller
 
         $company_info = ProviderData::where('zoho_cust_id', Session::get('loginId'))->first();
 
-        $paymentmethod = PaymentMethod::where('zoho_cust_id', $partner->zoho_cust_id)->first();
-
 
         // if ($availability_data === null || $company_info === null) {
         //     $showModal = true;
         // }
 
 
-        return view('partner.company-info', compact('provider_data', 'url', 'showModal', 'availability_data', 'company_info', 'partner', 'admins', 'paymentmethod'));
+        return view('partner.company-info', compact('provider_data', 'url', 'showModal', 'availability_data', 'company_info', 'partner', 'admins'));
     }
 
 
@@ -222,7 +218,7 @@ class ProviderDataController extends Controller
                 $csv_object_path = $cleaned_csv_path . $cleaned_csv_filename;
 
                 Storage::disk('s3')->put($csv_object_path, $cleaned_csv_content);
-
+                
                 $result = $this->s3Client->headObject([
                     'Bucket' => env("AWS_BUCKET"),
                     'Key'    => $csv_object_path,
@@ -238,7 +234,7 @@ class ProviderDataController extends Controller
                 $providerAvailabilityData->zoho_cust_id = $partner->zoho_cust_id;
                 $providerAvailabilityData->uploaded_by = $user->first_name . ' ' . $user->last_name . '(partner)';
                 $providerAvailabilityData->save();
-
+                
                 // Send notification to Sandstone that there is a new AOA file uploaded
                 $sandstone = new Sandstone();
                 $sandstone->AOAFileUploadNotification($partner->company_name, $providerAvailabilityData->id, $this->generatePresignedUrl($csv_object_path));
@@ -270,6 +266,7 @@ class ProviderDataController extends Controller
         $partner = Partner::where('zoho_cust_id', $data->zoho_cust_id)->first();
 
         $current_partner_user = PartnerUsers::where('zoho_cpid', Session::get('userId'))->first();
+
 
         $partner_name = $current_partner_user->first_name . ' ' . $current_partner_user->last_name;
 
@@ -308,9 +305,10 @@ class ProviderDataController extends Controller
                 'Bucket' => env('AWS_BUCKET'),
                 'Key'    => $request->input('url'),
             ]);
-
+            
             $presignedUrl = (string) $this->s3Client->createPresignedRequest($cmd, '+20 minutes')->getUri();
             return response()->json(['url' => $presignedUrl], 200);
+        
         } catch (\Exception $e) {
             Log::error('Error generating presigned URL: ' . $e->getMessage());
             return response()->json(['message' => 'Error generating presigned URL.'], 500);
@@ -334,6 +332,7 @@ class ProviderDataController extends Controller
             return response()->download($tempFile, basename($url), [
                 'Content-Type' => $result['ContentType'],
             ])->deleteFileAfterSend(true);
+        
         } catch (\Exception $e) {
             Log::error('Error downloading file: ' . $e->getMessage());
             return response()->json(['message' => 'Error downloading file.'], 500);
@@ -377,8 +376,8 @@ class ProviderDataController extends Controller
         $data->business_sales_phone_number = $request->business_sales_phone_number;
         $data->residential_sales_phone_number = $request->residential_sales_phone_number;
         $data->zoho_cust_id = $partner->zoho_cust_id;
-        $data->tune_link = $request->tune_link ?? NULL;
         $data->uploaded_by = $user->first_name . ' ' . $user->last_name . '(partner)';
+        $data->tune_link = 'NA';
         $data->save();
 
         $availability_data = ProviderAvailabilityData::where('zoho_cust_id', Session::get('loginId'))->first();
@@ -433,8 +432,8 @@ class ProviderDataController extends Controller
             $command = $this->s3Client->getCommand('GetObject', [
                 'Bucket' => env('AWS_BUCKET'),
                 'Key' => $objectKey,
-            ]);
-
+            ]); 
+            
             try {
                 return (string) $this->s3Client->createPresignedRequest($command, '+20 minutes')->getUri();
             } catch (\Exception $e) {
@@ -469,14 +468,8 @@ class ProviderDataController extends Controller
     public function sendDetailToAdmin(Request $request)
     {
         $company_info = ProviderData::where('zoho_cust_id', $request->partner_id)->first();
-        $provider_data = ProviderAvailabilityData::where('zoho_cust_id', $request->partner_id)->first();
         $partner = Partner::where('zoho_cust_id', $request->partner_id)->first();
-        if (Session::has('userId')) {
-            $current_partner_user = PartnerUsers::where('zoho_cpid', Session::get('userId'))->first();
-        } else {
-            $current_partner_user = PartnerUsers::where('zoho_cust_id', $request->partner_id)->where('is_primary', true)->first();
-        }
-
+        $current_partner_user = PartnerUsers::where('zoho_cpid', Session::get('userId'))->first();
         $admin = Admin::find($request->admin_id);
         $partner_name = $current_partner_user->first_name . ' ' . $current_partner_user->last_name;
         $partner_company = $partner->company_name;
@@ -486,10 +479,7 @@ class ProviderDataController extends Controller
         $logo_presigned_url = $this->generatePresignedUrl($url);
         $landing_page_url = $company_info->landing_page_url;
         $tune_link = $company_info->tune_link;
-        $file_url = $provider_data->url;
-        $file_name = $provider_data->file_name;
-        $presigned_url = $this->generatePresignedUrl($file_url);
-        Mail::to(users: $admin->email)->send(new CompanyInfoUpload($partner_name, $partner_email, $partner_company, $name, $file_name, $presigned_url, $logo_presigned_url, $landing_page_url, $url, $tune_link));
+        Mail::to(users: $admin->email)->send(new CompanyInfoUpload($partner_name, $partner_email, $partner_company, $name, $logo_presigned_url, $landing_page_url, $url, $tune_link));
         return back()->with('success', 'Details sent successfully');
     }
 }
